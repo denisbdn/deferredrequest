@@ -7,7 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	TIMEQUANTUMEXEC  time.Duration = 1 * time.Millisecond
+	TIMEQUANTUMEXEC  time.Duration = 10 * time.Millisecond
 	TIMEQUANTUMSTORE time.Duration = 10 * time.Second
 	TIMEQUANTUMWAIT  time.Duration = 20 * time.Second
 )
@@ -94,7 +94,7 @@ func (t *Task) Callback(w Worker, logger func(frm string, arg ...interface{})) {
 	}
 	defer resp.Body.Close()
 
-	body, errRead := ioutil.ReadAll(resp.Body)
+	body, errRead := io.ReadAll(resp.Body)
 	if errRead != nil {
 		logger("task: %d, uri: %s, read error: %s\n", t.Id, t.URI, errRead.Error())
 	}
@@ -648,7 +648,7 @@ func (c *Callbacks) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined base64_uri: /rest/timeout/base64_full_uri", Data: nil}.PrintJson(w)
 			return
 		}
-		body, errBody := ioutil.ReadAll(r.Body)
+		body, errBody := io.ReadAll(r.Body)
 		if errBody != nil {
 			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined rest data: /rest/timeout/base64_full_uri", Data: nil}.PrintJson(w)
 			return
@@ -683,7 +683,7 @@ func (c *Callbacks) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined base64_uri: /bin/timeout/base64_full_uri", Data: nil}.PrintJson(w)
 			return
 		}
-		body, errBody := ioutil.ReadAll(r.Body)
+		body, errBody := io.ReadAll(r.Body)
 		if errBody != nil {
 			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined rest data: /bin/timeout/base64_full_uri", Data: nil}.PrintJson(w)
 			return
