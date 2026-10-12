@@ -1,33 +1,27 @@
-FROM docker.io/library/golang:1.25.3 AS build
+# Этап 1: Сборка бинарного файла
+FROM docker.io/library/golang:1.25.3 AS builder
 
 WORKDIR /app
 
-# Копируем файлы зависимостей
-COPY go.mod ./
-# Если в репозитории есть go.sum, раскомментируйте строчку ниже:
-# COPY go.sum ./ 
-RUN go mod download
-
-# Копируем исходный код
+# Сразу копируем абсолютно ВСЕ файлы (включая скачанную папку vendor)
 COPY . .
 
-# Собираем оптимизированный бинарник под Linux
-RUN CGO_ENABLED=0 GOOS=linux go build -o deferredrequest main.go
+# Собираем бинарник в режиме -mod=vendor (Docker работает полностью оффлайн!)
+RUN CGO_ENABLED=0 GOOS=linux go build -mod=vendor -a -installsuffix cgo -o deferredrequest main.go
 
+# Этап 2: Финальный образ
 FROM docker.io/library/golang:1.25.3-alpine AS release
-
-RUN apk --no-cache add ca-certificates
 
 WORKDIR /root/
 
-# Копируем собранный файл из прошлого этапа
+# Копируем скомпилированный файл из этапа builder
 COPY --from=builder /app/deferredrequest .
 
 # Создаем директорию для хранения логов/файла задач
 RUN mkdir -p /root/data
 
-# Открываем порт, который сервис использует по умолчанию
+# Открываем порт сервиса
 EXPOSE 1122
 
-# Команда запуска с флагами (сохранение в контейнере по пути /root/data/tasks.json)
+# Команда запуска
 ENTRYPOINT ["./deferredrequest", "-addr", ":1122", "-store", "/root/data/tasks.json"]
