@@ -3,7 +3,11 @@ FROM docker.io/library/golang:1.25.3 AS builder
 
 WORKDIR /app
 
-# Сразу копируем абсолютно ВСЕ файлы (включая скачанную папку vendor)
+# Сначала копируем только файлы модулей и папку зависимостей
+COPY go.mod go.sum ./
+COPY vendor/ ./vendor/
+
+# Копируем остальной исходный код (сработает быстро при изменении кода)
 COPY . .
 
 # Собираем бинарник в режиме -mod=vendor (Docker работает полностью оффлайн!)
@@ -24,4 +28,5 @@ RUN mkdir -p /root/data
 EXPOSE 1122
 
 # Команда запуска
-ENTRYPOINT ["./deferredrequest", "-addr", ":1122", "-store", "/root/data/tasks.json"]
+ENTRYPOINT ["./deferredrequest"]
+CMD ["-addr", ":1122"]
