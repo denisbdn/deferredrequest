@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // конфиг
@@ -54,11 +55,12 @@ func main() {
 	flag.Parse()
 
 	logger = logs.NewLogs(*config.verbocity, log.New(os.Stdout, " out: ", 0), log.New(os.Stderr, " err: ", 0))
-	logger.Logprintln("Server Start")
-	logger.Logprintln("\taddr", *config.addr)
-	logger.Logprintln("\tmaxproc", *config.maxproc)
-	logger.Logprintln("\tverbocity", *config.verbocity)
-	defer logger.Logprintln("Server Stop")
+	logger.Errprintln("Server Start")
+	logger.Errprintln("\taddr", *config.addr)
+	logger.Errprintln("\tstore", *config.storeFile)
+	logger.Errprintln("\tverbocity", *config.verbocity)
+	logger.Errprintln("\tmaxproc", *config.maxproc)
+	defer logger.Errprintln("Server Stop")
 
 	// устанавливаем максимальное кол-во процессов
 	runtime.GOMAXPROCS(*config.maxproc)
@@ -92,9 +94,13 @@ func main() {
 
 	httpHandler.Stop()
 
-	// ожидаем завершения обработчиков
-	wg.Wait()
-
+	// Даем серверу 10 секунд на завершение текущих обработок
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	// завершаем веб сервер
-	server.Shutdown(context.Background())
+	server.Shutdown(shutdownCtx)
+	// server.Shutdown(context.Background()) // нет лимита по timeout
+
+	// ожидаем завершения записи на диск (обработчики уже должны были завершиться)
+	wg.Wait()
 }

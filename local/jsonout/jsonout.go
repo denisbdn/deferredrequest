@@ -13,7 +13,7 @@ const (
 )
 
 type Response struct {
-	Errno int         `json:"errno,omitempty"`
+	Errno int         `json:"errno"`
 	Error string      `json:"error,omitempty"`
 	Data  interface{} `json:"data,omitempty"`
 }

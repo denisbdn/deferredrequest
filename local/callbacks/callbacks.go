@@ -6,7 +6,6 @@ import (
 	"deferredrequest/local/jsonout"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -538,28 +537,6 @@ func (c *Callbacks) Stop() {
 	}
 }
 
-func parseDuration(durationStr string) (int64, error) {
-	var duration int64 = 0
-	var err error = nil
-	switch {
-	case strings.HasSuffix(durationStr, "ms"):
-		_, err = fmt.Sscanf(durationStr, "%dms", &duration)
-	case strings.HasSuffix(durationStr, "s"):
-		_, err = fmt.Sscanf(durationStr, "%ds", &duration)
-		duration = duration * 1000
-	case strings.HasSuffix(durationStr, "min"):
-		_, err = fmt.Sscanf(durationStr, "%dh", &duration)
-		duration = duration * 1000 * 60
-	case strings.HasSuffix(durationStr, "h"):
-		_, err = fmt.Sscanf(durationStr, "%dh", &duration)
-		duration = duration * 1000 * 3600
-	default:
-		_, err = fmt.Sscanf(durationStr, "%d", &duration)
-		duration = duration * 1000
-	}
-	return duration, err
-}
-
 func parseHeaders(headers http.Header) http.Header {
 	res := make(http.Header)
 	for key, values := range headers {
@@ -580,6 +557,7 @@ func (c *Callbacks) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			c.logger("ServeHTTP Recovered path=%s line=%d error=%v\n", file, line, r)
 		}
 	}()
+	// нужно правильно завершать сервис см конец функции main
 	c.wg.Add(1)
 	defer c.wg.Done()
 	for atomic.LoadInt32(&c.work) == 0 {
@@ -604,7 +582,7 @@ func (c *Callbacks) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.HasPrefix(path, "/put/") {
 		durationStr := path[5:]
-		duration, errDur := parseDuration(durationStr)
+		duration, errDur := time.ParseDuration(durationStr)
 		if errDur != nil {
 			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined: /put/timeout", Data: nil}.PrintJson(w)
 			return
@@ -625,7 +603,7 @@ func (c *Callbacks) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		task.Id = 0 // add new task
 		task.Headers = parseHeaders(r.Header)
 		task.Created = time.Now()
-		task.Timeout = task.Created.Add(time.Millisecond * time.Duration(duration))
+		task.Timeout = task.Created.Add(duration)
 		task.URI = uri[0]
 		task.Data = r.PostForm
 		delete(task.Data, "uri")
@@ -638,7 +616,7 @@ func (c *Callbacks) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined timeout & base64_uri: /rest/timeout/base64_full_uri", Data: nil}.PrintJson(w)
 			return
 		}
-		duration, errDur := parseDuration(arr[0])
+		duration, errDur := time.ParseDuration(arr[0])
 		if errDur != nil {
 			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined timeout: /rest/timeout/base64_full_uri", Data: nil}.PrintJson(w)
 			return
@@ -660,7 +638,7 @@ func (c *Callbacks) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		task.Id = 0 // add new task
 		task.Headers = parseHeaders(r.Header)
 		task.Created = time.Now()
-		task.Timeout = task.Created.Add(time.Millisecond * time.Duration(duration))
+		task.Timeout = task.Created.Add(duration)
 		task.URI = string(URL[:])
 		task.Rest = string(body[:])
 		task.Headers = parseHeaders(r.Header)
@@ -673,7 +651,7 @@ func (c *Callbacks) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined timeout & base64_uri: /bin/timeout/base64_full_uri", Data: nil}.PrintJson(w)
 			return
 		}
-		duration, errDur := parseDuration(arr[0])
+		duration, errDur := time.ParseDuration(arr[0])
 		if errDur != nil {
 			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined timeout: /bin/timeout/base64_full_uri", Data: nil}.PrintJson(w)
 			return
@@ -695,7 +673,7 @@ func (c *Callbacks) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		task.Id = 0 // add new task
 		task.Headers = parseHeaders(r.Header)
 		task.Created = time.Now()
-		task.Timeout = task.Created.Add(time.Millisecond * time.Duration(duration))
+		task.Timeout = task.Created.Add(duration)
 		task.URI = string(URL[:])
 		task.Bin = body[:]
 		res, _ := c.Set(task)
