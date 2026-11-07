@@ -639,6 +639,7 @@ func (c *Callbacks) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		durationStr := path[5:]
 		duration, errDur := time.ParseDuration(durationStr)
 		if errDur != nil {
+			c.logger("error parse timeout: %s\n", errDur.Error())
 			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined: /put/timeout", Data: nil}.PrintJson(w)
 			return
 		}
@@ -674,6 +675,7 @@ func (c *Callbacks) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		duration, errDur := time.ParseDuration(arr[0])
 		if errDur != nil {
+			c.logger("error parse timeout: %s\n", errDur.Error())
 			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined timeout: /rest/timeout/base64_full_uri", Data: nil}.PrintJson(w)
 			return
 		}
@@ -710,6 +712,7 @@ func (c *Callbacks) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		duration, errDur := time.ParseDuration(arr[0])
 		if errDur != nil {
+			c.logger("error parse timeout: %s\n", errDur.Error())
 			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined timeout: /bin/timeout/base64_full_uri", Data: nil}.PrintJson(w)
 			return
 		}
@@ -737,19 +740,21 @@ func (c *Callbacks) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		res, _ := c.Set(task)
 		c.logger("Add task %d URI: %s\n", res.Id, res.URI)
 		jsonout.Response{Errno: jsonout.Ok, Error: "", Data: res}.PrintJson(w)
-	} else if strings.HasPrefix(path, "/putt/") {
+	} else if strings.HasPrefix(path, "/putc/") {
 		arr := strings.SplitN(path[6:], "/", 2)
 		if len(arr) != 2 {
 			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined timecreate & timeout & base64_uri: /putt/timecreate/timeout", Data: nil}.PrintJson(w)
 			return
 		}
-		create, errDur := time.Parse(arr[0], TIMELAYOUT)
-		if errDur != nil {
+		create, errCreate := time.Parse(TIMELAYOUT, arr[0])
+		if errCreate != nil {
+			c.logger("error parse timecreate: %s\n", errCreate.Error())
 			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined timecreate: /putt/timecreate/timeout", Data: nil}.PrintJson(w)
 			return
 		}
 		duration, errDur := time.ParseDuration(arr[1])
 		if errDur != nil {
+			c.logger("error parse timeout: %s\n", errDur.Error())
 			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined timeout: /putt/timecreate/timeout", Data: nil}.PrintJson(w)
 			return
 		}
@@ -765,7 +770,7 @@ func (c *Callbacks) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		task := new(Task)
 		task.IsWork = false
-		task.IsCrone = false // время следующего выполнения это время окончания текущей задачи + (task.Timeout - task.Created)
+		task.IsCrone = true // время следующего выполнения это время окончания текущей задачи + (task.Timeout - task.Created)
 		task.Name = name
 		task.Id = 0 // add new task
 		task.Headers = parseHeaders(r.Header)
@@ -777,19 +782,21 @@ func (c *Callbacks) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		res, _ := c.Set(task)
 		c.logger("Add task %d URI: %s\n", res.Id, res.URI)
 		jsonout.Response{Errno: jsonout.Ok, Error: "", Data: res}.PrintJson(w)
-	} else if strings.HasPrefix(path, "/restt/") {
+	} else if strings.HasPrefix(path, "/restc/") {
 		arr := strings.SplitN(path[7:], "/", 3)
 		if len(arr) != 3 {
 			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined timecreate & timeout & base64_uri: /restt/timecreate/timeout/base64_full_uri", Data: nil}.PrintJson(w)
 			return
 		}
-		create, errDur := time.Parse(arr[0], TIMELAYOUT)
-		if errDur != nil {
+		create, errCreate := time.Parse(TIMELAYOUT, arr[0])
+		if errCreate != nil {
+			c.logger("error parse timecreate: %s\n", errCreate.Error())
 			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined timecreate: /putt/timecreate/timeout", Data: nil}.PrintJson(w)
 			return
 		}
 		duration, errDur := time.ParseDuration(arr[1])
 		if errDur != nil {
+			c.logger("error parse timeout: %s\n", errDur.Error())
 			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined timeout: /restt/timecreate/timeout/base64_full_uri", Data: nil}.PrintJson(w)
 			return
 		}
@@ -806,7 +813,7 @@ func (c *Callbacks) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 		task := new(Task)
 		task.IsWork = false
-		task.IsCrone = false // время следующего выполнения это время окончания текущей задачи + (task.Timeout - task.Created)
+		task.IsCrone = true // время следующего выполнения это время окончания текущей задачи + (task.Timeout - task.Created)
 		task.Name = name
 		task.Id = 0 // add new task
 		task.Headers = parseHeaders(r.Header)
@@ -818,19 +825,21 @@ func (c *Callbacks) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		res, _ := c.Set(task)
 		c.logger("Add task %d URI: %s\n", res.Id, res.URI)
 		jsonout.Response{Errno: jsonout.Ok, Error: "", Data: res}.PrintJson(w)
-	} else if strings.HasPrefix(path, "/bint/") {
+	} else if strings.HasPrefix(path, "/binc/") {
 		arr := strings.SplitN(path[6:], "/", 3)
 		if len(arr) != 3 {
 			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined timeout & base64_uri: /bin/timecreate/timeout/base64_full_uri", Data: nil}.PrintJson(w)
 			return
 		}
-		create, errDur := time.Parse(arr[0], TIMELAYOUT)
-		if errDur != nil {
+		create, errCreate := time.Parse(TIMELAYOUT, arr[0])
+		if errCreate != nil {
+			c.logger("error parse timecreate: %s\n", errCreate.Error())
 			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined timecreate: /putt/timecreate/timeout", Data: nil}.PrintJson(w)
 			return
 		}
 		duration, errDur := time.ParseDuration(arr[1])
 		if errDur != nil {
+			c.logger("error parse timeout: %s\n", errDur.Error())
 			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined timeout: /bin/timecreate/timeout/base64_full_uri", Data: nil}.PrintJson(w)
 			return
 		}
@@ -847,7 +856,7 @@ func (c *Callbacks) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 		task := new(Task)
 		task.IsWork = false
-		task.IsCrone = false // время следующего выполнения это время окончания текущей задачи + (task.Timeout - task.Created)
+		task.IsCrone = true // время следующего выполнения это время окончания текущей задачи + (task.Timeout - task.Created)
 		task.Name = name
 		task.Id = 0 // add new task
 		task.Headers = parseHeaders(r.Header)
