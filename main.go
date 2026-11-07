@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
-	"sync"
 	"syscall"
 	"time"
 )
@@ -74,8 +73,7 @@ func main() {
 		}
 	}
 
-	wg := sync.WaitGroup{}
-	httpHandler := callbacks.NewCallbacks(&wg, *config.storeFile, func(frm string, arg ...interface{}) { logger.Logprint(frm, arg...) })
+	httpHandler := callbacks.NewCallbacks(*config.storeFile, func(frm string, arg ...interface{}) { logger.Logprint(frm, arg...) })
 	mux := http.NewServeMux()
 	mux.Handle("/", httpHandler)
 	server := &http.Server{Addr: *config.addr, Handler: mux}
@@ -92,8 +90,6 @@ func main() {
 	// висим пока кто-то не запишет флаг в канал
 	<-exit_ch
 
-	httpHandler.Stop()
-
 	// Даем серверу 10 секунд на завершение текущих обработок
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -101,6 +97,7 @@ func main() {
 	server.Shutdown(shutdownCtx)
 	// server.Shutdown(context.Background()) // нет лимита по timeout
 
-	// ожидаем завершения записи на диск (обработчики уже должны были завершиться)
-	wg.Wait()
+	// после завершения веб сервера никто из новых goroutine не может делать Callbacks.wg.Add(1)
+	// осталось дождаться завершения всех Callbacks.check() и всех Task.Callback()
+	httpHandler.Stop()
 }

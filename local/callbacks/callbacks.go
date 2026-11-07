@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,9 +21,9 @@ import (
 )
 
 const (
-	TIMEQUANTUMEXEC  time.Duration = 10 * time.Millisecond
 	TIMEQUANTUMSTORE time.Duration = 10 * time.Second
 	TIMEQUANTUMWAIT  time.Duration = 20 * time.Second
+	TIMELAYOUT       string        = "2006-01-02 15:04:05"
 )
 
 type Worker interface {
@@ -34,6 +35,7 @@ type Task struct {
 	Id      int64       `json:"id,omitempty"`      // id autoincrement, if len(name) == 0
 	Name    string      `json:"name,omitempty"`    // name. if id ==0
 	IsWork  bool        `json:"execute,omitempty"` // for named task only: true is task execute
+	IsCrone bool        `json:"iscrone,omitempty"` // for named task only: true for task with precise execution time
 	Created time.Time   `json:"created,omitempty"` // time create
 	Timeout time.Time   `json:"timeout,omitempty"` // time for request callback
 	URI     string      `json:"uri,omitempty"`     // callback URI
@@ -102,66 +104,97 @@ func (t *Task) Callback(w Worker, logger func(frm string, arg ...interface{})) {
 }
 
 type Callbacks struct {
-	lastId    int64                                // for autoincrement
-	tasks     []*Task                              // list of tasks sorted by request callback. ASC
-	ids       map[int64]*Task                      // map of tasks for fast search by id
-	namedIds  map[string]*Task                     // map of tasks for fast search by name
-	mutex     sync.Mutex                           // mutex for sync
-	work      int32                                // label for internal goroutine
-	wg        *sync.WaitGroup                      // for clear exiting
-	changed   bool                                 // label for change task
-	storeFile string                               // file for store
-	logger    func(frm string, arg ...interface{}) // external logger
+	lastId      int64                                // for autoincrement
+	tasks       []*Task                              // list of tasks sorted by request callback. ASC
+	execTasks   []*Task                              // list of execute tasks
+	ids         map[int64]*Task                      // map of tasks for fast search by id
+	namedIds    map[string]*Task                     // map of tasks for fast search by name
+	mutex       sync.Mutex                           // mutex for sync
+	work        int32                                // label for internal goroutine
+	wg          sync.WaitGroup                       // for clear exiting
+	changed     bool                                 // label for change task
+	addDataChan chan bool                            // channel for add Task to task
+	storeFile   string                               // file for store
+	logger      func(frm string, arg ...interface{}) // external logger
+}
+
+func (c *Callbacks) addExecTask(t *Task) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	// массив c.execTasks НЕ отсортирован т.к. заполняется в goriutine и нет шарантии строгой сортировки
+	c.execTasks = append(c.execTasks, t)
+}
+
+func (c *Callbacks) rmExecTask(t *Task) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	index := -1
+	// т.к. НЕТ гарантии строгой сортировки, то проходим полностью
+	for i, item := range c.execTasks {
+		if t == item {
+			index = i
+			break
+		}
+		if item.Id != 0 && item.Id == t.Id {
+			index = i
+			break
+		}
+		if len(item.Name) > 0 && item.Name == t.Name {
+			index = i
+			break
+		}
+	}
+	if index != -1 {
+		c.execTasks = append(c.execTasks[:index], c.execTasks[index+1:]...)
+	}
 }
 
 // имплементируем интерфейс Worker
 func (c *Callbacks) Before(t *Task) {
 	// увеличиваем число глобальных задач
 	c.wg.Add(1)
+	// запоминаем задачу в список исполняемых
+	t.IsWork = true
+	c.addExecTask(t)
 }
 
 // имплементируем интерфейс Worker
 func (c *Callbacks) After(t *Task) {
 	// уменьшаем число глобальных задач
-	c.wg.Add(-1)
+	c.wg.Done()
+	// убираем задачу из списка исполняемых
+	c.rmExecTask(t)
 	// если задача не именованная - выходим
 	if len(t.Name) == 0 {
 		return
 	}
+	// если ее вставили по новой - выходим
+	if c.GetByName(t.Name) != nil {
+		return
+	}
 	// иначе восстанавливаем задачу
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	// индекс в массиве
-	index := c.getIndexByTask(t)
-	// если задача удалена - выходим
-	if index == -1 {
-		return
-	}
-	// если задача не в статусе IsWork == true - т.е. ее удалили и создали заново с другим таймаутом
-	if !c.tasks[index].IsWork {
-		return
-	}
-	// иначе чистим массив
-	c.tasks = append(c.tasks[:index], c.tasks[index+1:]...)
-
-	// меняем задачу
-	// убираем флаг IsWork
 	t.IsWork = false
 	// вычисляем старый таймаут
-	duration := t.Timeout.Sub(t.Created) - 2*TIMEQUANTUMWAIT
-	// устнавливаем новое время
-	t.Created = time.Now()
-	// и таймаут
-	t.Timeout = t.Created.Add(duration)
-	// вычисляем новое положение в массиве
-	index = c.getIndexByTimeout(t.Timeout)
-	// сперва добавляем в конец массива
-	c.tasks = append(c.tasks, t)
-	// смещаем остаток
-	copy(c.tasks[index+1:], c.tasks[index:])
-	// утснавливаем в нужное положение
-	c.tasks[index] = t
-	c.changed = true
+	duration := t.Timeout.Sub(t.Created)
+	if t.IsCrone {
+		// если задан режим crone то время берем строго детерминированным, и учитывая выполнения запроса,
+		// проверяем в цикле чтобы не было ситуации когда запросы могут накапливаться
+		t.Created = t.Timeout
+		t.Timeout = t.Created.Add(duration)
+		now := time.Now()
+		for t.Timeout.Before(now) {
+			t.Created = t.Timeout
+			t.Timeout = t.Created.Add(duration)
+		}
+	} else {
+		// для остальных случаев берем текущее время и прибавляем duration, время выполнения запроса
+		// будет автоматически учитываться, накапливаться запросы не смогут
+		// устнавливаем новое время
+		t.Created = time.Now()
+		// и таймаут
+		t.Timeout = t.Created.Add(duration)
+	}
+	c.Set(t)
 }
 
 /*
@@ -223,59 +256,43 @@ func (c *Callbacks) getIndexByTimeout(timeout time.Time) int {
 
 /*
  * берет первый элемент в отсортированном по Timeout массиве и если
- * время выполнения задачи истекло то выдает ее, если нет nil
- * для неименованного задания удаляет его из массива, для именнованного
- * перемещает задание гарантированно на место time.Now() + duration + 2*TIMEQUANTUMWAIT
+ * время выполнения задачи истекло то выдает задачу и 0 в Duration,
+ * если нет то nil и таймайут до ближайшей задачи,
+ * удаляет задание его из массива tasks.
  */
-func (c *Callbacks) pop(maxTime time.Time) *Task {
+func (c *Callbacks) pop(maxTime time.Time) (*Task, time.Duration) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	if len(c.tasks) == 0 {
-		return nil
+		return nil, TIMEQUANTUMSTORE
 	}
 	res := c.tasks[0]
 	if maxTime.Before(res.Timeout) {
-		return nil
+		return nil, time.Until(res.Timeout)
 	}
-	if len(res.Name) != 0 {
-		// удалеяем первый элемент
-		c.tasks = c.tasks[1:]
-		// меняем статус IsWork
-		res.IsWork = true
-		// вычисляем старый duration
-		duration := res.Timeout.Sub(res.Created)
-		// обновляем время
-		res.Created = time.Now()
-		// таймаут ставим гарантированно больше времяни выполения запроса, но чтобы модно было вычилить старый duration
-		res.Timeout = res.Created.Add(duration + 2*TIMEQUANTUMWAIT)
-		// выясняем новое место в массиве
-		index := c.getIndexByTimeout(res.Timeout)
-		// сперва вставляем в конец
-		c.tasks = append(c.tasks, res)
-		// смещаем заднюю часть
-		copy(c.tasks[index+1:], c.tasks[index:])
-		// ставим в нужную позицию
-		c.tasks[index] = res
-	} else {
-		c.tasks = c.tasks[1:]
-		delete(c.ids, res.Id)
-	}
+	c.tasks = c.tasks[1:]
+	delete(c.ids, res.Id)        // если неименнованный удялем по Id
+	delete(c.namedIds, res.Name) // елси именнованный то удаляем по Name
 	c.changed = true
-	return res
+	return res, 0
 }
 
 func (c *Callbacks) check() {
-	c.wg.Add(1)
-	defer c.wg.Done()
 	for atomic.LoadInt32(&c.work) != 0 {
-		task := c.pop(time.Now())
-		// если задач нет, спим
-		if task == nil {
-			time.Sleep(TIMEQUANTUMEXEC)
-			continue
+		task, dur := c.pop(time.Now()) // удалили задачу из c.tasks
+		if task != nil {
+			// если есть выполняем задачу, передаем c в качестве Worker интерфейса
+			go task.Callback(c, c.logger)
+		} else {
+			// если задач нет, спим
+			c.logger("sleeping for %s\n", dur.String())
+			select {
+			case <-time.After(dur): // до времени когда настанет время исполнять следующую
+				c.logger("wake up after timeout\n")
+			case <-c.addDataChan: // когда кто то добавил задачу в начало Callbacks.tasks
+				c.logger("wake up after channel\n")
+			}
 		}
-		// если есть выполняем задачу, передаем c в качестве Worker интерфейса
-		go task.Callback(c, c.logger)
 	}
 }
 
@@ -337,11 +354,25 @@ func read(filePath string) ([]*Task, map[int64]*Task, map[string]*Task, int64) {
 			// убираем флаг IsWork
 			task.IsWork = false
 			// вычисляем старый таймаут
-			duration := task.Timeout.Sub(task.Created) - 2*TIMEQUANTUMWAIT
-			// устнавливаем новое время
-			task.Created = time.Now()
-			// и таймаут
-			task.Timeout = task.Created.Add(duration)
+			duration := task.Timeout.Sub(task.Created)
+			if task.IsCrone {
+				// если задан режим crone то время берем строго детерминированным, и учитывая выполнения запроса,
+				// проверяем в цикле чтобы не было ситуации когда запросы могут накапливаться
+				task.Created = task.Timeout
+				task.Timeout = task.Created.Add(duration)
+				now := time.Now()
+				for task.Timeout.Before(now) {
+					task.Created = task.Timeout
+					task.Timeout = task.Created.Add(duration)
+				}
+			} else {
+				// для остальных случаев берем текущее время и прибавляем duration, время выполнения запроса
+				// будет автоматически учитываться, накапливаться запросы не смогут
+				// устнавливаем новое время
+				task.Created = time.Now()
+				// и таймаут
+				task.Timeout = task.Created.Add(duration)
+			}
 			// вычисляем новое положение в массиве
 			index = indexByTimeout(tasks, task.Timeout)
 			// сперва добавляем в конец массива
@@ -366,8 +397,7 @@ func (c *Callbacks) store() {
 			time.Sleep(TIMEQUANTUMSTORE)
 			continue
 		}
-		f := false
-		array := c.getList(0xEFFFFFFF, 0, &f)
+		array := c.getList(0xEFFFFFFF, 0)
 		write(c.storeFile, array)
 	}
 }
@@ -383,12 +413,13 @@ func FileExists(filename string) int64 {
 	return info.Size()
 }
 
-func NewCallbacks(wg *sync.WaitGroup, storeFile string, logger func(frm string, arg ...interface{})) *Callbacks {
+func NewCallbacks(storeFile string, logger func(frm string, arg ...interface{})) *Callbacks {
 	res := new(Callbacks)
 	res.mutex = sync.Mutex{}
 	res.work = 1
-	res.wg = wg
+	res.wg = sync.WaitGroup{}
 	res.changed = false
+	res.addDataChan = make(chan bool)
 	res.storeFile = storeFile
 	res.logger = logger
 	if len(res.storeFile) > 0 && FileExists(res.storeFile) >= 0 {
@@ -420,12 +451,12 @@ func (c *Callbacks) Set(add *Task) (*Task, int) {
 		if ok {
 			return task, c.getIndexByTask(task)
 		}
-	} else if add.Id != 0 { // если нет
+	} else if add.Id != 0 { // если имеет индекс
 		task, ok := c.ids[add.Id]
 		if ok {
 			return task, c.getIndexByTask(task)
 		}
-	} else {
+	} else { // если оно новое, неименованное
 		add.Id = c.lastId
 		c.lastId++
 	}
@@ -439,6 +470,9 @@ func (c *Callbacks) Set(add *Task) (*Task, int) {
 		c.ids[add.Id] = add
 	}
 	c.changed = true
+	if index == 0 { // уведомляем что надо проснуться и сделать Callbacks.pop
+		c.addDataChan <- true
+	}
 	return add, index
 }
 
@@ -473,6 +507,7 @@ func (c *Callbacks) DelById(id int64) (*Task, int) {
 		return nil, -1
 	}
 	delete(c.ids, id)
+	delete(c.namedIds, task.Name) // сработает вхолостую см Callbacks.Set
 	index := c.getIndexByTask(task)
 	if index >= 0 {
 		c.tasks = append(c.tasks[:index], c.tasks[index+1:]...)
@@ -490,6 +525,7 @@ func (c *Callbacks) DelByName(name string) (*Task, int) {
 		return nil, -1
 	}
 	delete(c.namedIds, name)
+	delete(c.ids, task.Id) // сработает вхолостую см Callbacks.Set
 	index := c.getIndexByTask(task)
 	if index >= 0 {
 		c.tasks = append(c.tasks[:index], c.tasks[index+1:]...)
@@ -499,7 +535,24 @@ func (c *Callbacks) DelByName(name string) (*Task, int) {
 }
 
 // так как появились изменяемые именнованные задания то нужно делать глубокую копию
-func (c *Callbacks) getList(limit int, offset int, isChange *bool) []*Task {
+func (c *Callbacks) getExecList(limit int, offset int) []*Task {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	res := make([]*Task, 0)
+	length := len(c.execTasks)
+	for i := offset; i < offset+limit && i < length; i++ {
+		tmp := *(c.execTasks[i])
+		res = append(res, &tmp)
+	}
+	// 1. Сортировка по возрастанию возраста (Age)
+	slices.SortFunc(res, func(a, b *Task) int {
+		return a.Timeout.Compare(b.Timeout)
+	})
+	return res
+}
+
+// так как появились изменяемые именнованные задания то нужно делать глубокую копию
+func (c *Callbacks) getList(limit int, offset int) []*Task {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	res := make([]*Task, 0)
@@ -508,31 +561,32 @@ func (c *Callbacks) getList(limit int, offset int, isChange *bool) []*Task {
 		tmp := *(c.tasks[i])
 		res = append(res, &tmp)
 	}
-	if isChange != nil {
-		c.changed = *isChange
-	}
 	return res
 }
 
 func (c *Callbacks) GetList(limit int, offset int) []*Task {
-	res := c.getList(limit, offset, nil)
-	for _, t := range res {
-		if len(t.Name) != 0 && t.IsWork {
-			// вычисляем старый таймаут
-			duration := t.Timeout.Sub(t.Created) - 2*TIMEQUANTUMWAIT
-			// ставим реальный таймаут
-			t.Timeout = t.Created.Add(duration)
-			// IsWork полезно не менять он может показыть что задание в работе
+	res := c.getExecList(0xEFFFFFFF, 0) // все исполняемые
+	if len(res)-offset > 0 {
+		res = res[offset:]
+		if len(res) < limit {
+			res = append(res, c.getList(limit-len(res), 0)...)
+		} else if len(res) > limit {
+			res = res[:limit]
 		}
+	} else {
+		res = c.getList(limit, offset-len(res))
 	}
 	return res
 }
 
 func (c *Callbacks) Stop() {
 	atomic.StoreInt32(&c.work, 0)
+	c.wg.Wait()
+	// код ниже делает запись если данные добавились на последней итерации Callbacks.store()
 	if len(c.storeFile) > 0 && c.IsChanged() {
-		f := false
-		array := c.getList(0xEFFFFFFF, 0, &f)
+		// пишем ТОЛЬКО c.getList т.к. c.getExecList будет пустым,
+		// т.к. c.check() завершился и дождались c.wg.Wait()
+		array := c.getList(0xEFFFFFFF, 0)
 		write(c.storeFile, array)
 	}
 }
@@ -557,13 +611,14 @@ func (c *Callbacks) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			c.logger("ServeHTTP Recovered path=%s line=%d error=%v\n", file, line, r)
 		}
 	}()
-	// нужно правильно завершать сервис см конец функции main
-	c.wg.Add(1)
-	defer c.wg.Done()
+	// проверяем работает ли сервис
 	for atomic.LoadInt32(&c.work) == 0 {
 		jsonout.Response{Errno: jsonout.ServerError, Error: "Server is stopping", Data: nil}.PrintJson(w)
 		return
 	}
+	// нужно правильно завершать сервис см Callbacks.Stop()
+	c.wg.Add(1)
+	defer c.wg.Done()
 	var path string = ""
 	if strings.HasSuffix(r.URL.Path, "/") {
 		path = r.URL.Path[:len(r.URL.Path)-1]
@@ -599,6 +654,7 @@ func (c *Callbacks) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		task := new(Task)
 		task.IsWork = false
+		task.IsCrone = false // время следующего выполнения это время окончания текущей задачи + (task.Timeout - task.Created)
 		task.Name = name
 		task.Id = 0 // add new task
 		task.Headers = parseHeaders(r.Header)
@@ -634,6 +690,7 @@ func (c *Callbacks) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 		task := new(Task)
 		task.IsWork = false
+		task.IsCrone = false // время следующего выполнения это время окончания текущей задачи + (task.Timeout - task.Created)
 		task.Name = name
 		task.Id = 0 // add new task
 		task.Headers = parseHeaders(r.Header)
@@ -669,10 +726,132 @@ func (c *Callbacks) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 		task := new(Task)
 		task.IsWork = false
+		task.IsCrone = false // время следующего выполнения это время окончания текущей задачи + (task.Timeout - task.Created)
 		task.Name = name
 		task.Id = 0 // add new task
 		task.Headers = parseHeaders(r.Header)
 		task.Created = time.Now()
+		task.Timeout = task.Created.Add(duration)
+		task.URI = string(URL[:])
+		task.Bin = body[:]
+		res, _ := c.Set(task)
+		c.logger("Add task %d URI: %s\n", res.Id, res.URI)
+		jsonout.Response{Errno: jsonout.Ok, Error: "", Data: res}.PrintJson(w)
+	} else if strings.HasPrefix(path, "/putt/") {
+		arr := strings.SplitN(path[6:], "/", 2)
+		if len(arr) != 2 {
+			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined timecreate & timeout & base64_uri: /putt/timecreate/timeout", Data: nil}.PrintJson(w)
+			return
+		}
+		create, errDur := time.Parse(arr[0], TIMELAYOUT)
+		if errDur != nil {
+			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined timecreate: /putt/timecreate/timeout", Data: nil}.PrintJson(w)
+			return
+		}
+		duration, errDur := time.ParseDuration(arr[1])
+		if errDur != nil {
+			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined timeout: /putt/timecreate/timeout", Data: nil}.PrintJson(w)
+			return
+		}
+		errForm := r.ParseForm()
+		if errForm != nil {
+			jsonout.Response{Errno: jsonout.BadParam, Error: "Parse Error", Data: nil}.PrintJson(w)
+			return
+		}
+		uri, ok := r.Form["uri"]
+		if !ok {
+			jsonout.Response{Errno: jsonout.BadParam, Error: "'uri' parameter is absent", Data: nil}.PrintJson(w)
+			return
+		}
+		task := new(Task)
+		task.IsWork = false
+		task.IsCrone = false // время следующего выполнения это время окончания текущей задачи + (task.Timeout - task.Created)
+		task.Name = name
+		task.Id = 0 // add new task
+		task.Headers = parseHeaders(r.Header)
+		task.Created = create
+		task.Timeout = task.Created.Add(duration)
+		task.URI = uri[0]
+		task.Data = r.PostForm
+		delete(task.Data, "uri")
+		res, _ := c.Set(task)
+		c.logger("Add task %d URI: %s\n", res.Id, res.URI)
+		jsonout.Response{Errno: jsonout.Ok, Error: "", Data: res}.PrintJson(w)
+	} else if strings.HasPrefix(path, "/restt/") {
+		arr := strings.SplitN(path[7:], "/", 3)
+		if len(arr) != 3 {
+			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined timecreate & timeout & base64_uri: /restt/timecreate/timeout/base64_full_uri", Data: nil}.PrintJson(w)
+			return
+		}
+		create, errDur := time.Parse(arr[0], TIMELAYOUT)
+		if errDur != nil {
+			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined timecreate: /putt/timecreate/timeout", Data: nil}.PrintJson(w)
+			return
+		}
+		duration, errDur := time.ParseDuration(arr[1])
+		if errDur != nil {
+			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined timeout: /restt/timecreate/timeout/base64_full_uri", Data: nil}.PrintJson(w)
+			return
+		}
+		URL, errDecode := base64.StdEncoding.DecodeString(arr[2])
+		if errDecode != nil {
+			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined base64_uri: /restt/timecreate/timeout/base64_full_uri", Data: nil}.PrintJson(w)
+			return
+		}
+		body, errBody := io.ReadAll(r.Body)
+		if errBody != nil {
+			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined rest data: /rest/timecreate/timeout/base64_full_uri", Data: nil}.PrintJson(w)
+			return
+		}
+		defer r.Body.Close()
+		task := new(Task)
+		task.IsWork = false
+		task.IsCrone = false // время следующего выполнения это время окончания текущей задачи + (task.Timeout - task.Created)
+		task.Name = name
+		task.Id = 0 // add new task
+		task.Headers = parseHeaders(r.Header)
+		task.Created = create
+		task.Timeout = task.Created.Add(duration)
+		task.URI = string(URL[:])
+		task.Rest = string(body[:])
+		task.Headers = parseHeaders(r.Header)
+		res, _ := c.Set(task)
+		c.logger("Add task %d URI: %s\n", res.Id, res.URI)
+		jsonout.Response{Errno: jsonout.Ok, Error: "", Data: res}.PrintJson(w)
+	} else if strings.HasPrefix(path, "/bint/") {
+		arr := strings.SplitN(path[6:], "/", 3)
+		if len(arr) != 3 {
+			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined timeout & base64_uri: /bin/timecreate/timeout/base64_full_uri", Data: nil}.PrintJson(w)
+			return
+		}
+		create, errDur := time.Parse(arr[0], TIMELAYOUT)
+		if errDur != nil {
+			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined timecreate: /putt/timecreate/timeout", Data: nil}.PrintJson(w)
+			return
+		}
+		duration, errDur := time.ParseDuration(arr[1])
+		if errDur != nil {
+			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined timeout: /bin/timecreate/timeout/base64_full_uri", Data: nil}.PrintJson(w)
+			return
+		}
+		URL, errDecode := base64.StdEncoding.DecodeString(arr[2])
+		if errDecode != nil {
+			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined base64_uri: /bin/timecreate/timeout/base64_full_uri", Data: nil}.PrintJson(w)
+			return
+		}
+		body, errBody := io.ReadAll(r.Body)
+		if errBody != nil {
+			jsonout.Response{Errno: jsonout.BadParam, Error: "Undefined rest data: /bin/timecreate/timeout/base64_full_uri", Data: nil}.PrintJson(w)
+			return
+		}
+		defer r.Body.Close()
+		task := new(Task)
+		task.IsWork = false
+		task.IsCrone = false // время следующего выполнения это время окончания текущей задачи + (task.Timeout - task.Created)
+		task.Name = name
+		task.Id = 0 // add new task
+		task.Headers = parseHeaders(r.Header)
+		task.Created = create
 		task.Timeout = task.Created.Add(duration)
 		task.URI = string(URL[:])
 		task.Bin = body[:]
